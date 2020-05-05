@@ -2,7 +2,7 @@ __all__ = ['Sequential']
 
 
 class Sequential:
-    def __init__(self):
+    def __init__(self, sampling_frequency):
         """
         Sequential model for procssing a pipeline for IMU analysis
 
@@ -19,6 +19,7 @@ class Sequential:
             Predict/run the processing pipeline on the input data
         """
         self.procs = []
+        self.fs = sampling_frequency
 
     def add(self, process):
         """
@@ -30,7 +31,7 @@ class Sequential:
             A instantiated process class, that has a `predict` method that takes in data as a dictionary or path to
             a HDF file(see :class:`~gaitpy.pipeline.Sequential.predict`)
         """
-
+        process._parent = self  # set the parent for the process
         self.procs.append(process)
 
     def predict(self, data):
