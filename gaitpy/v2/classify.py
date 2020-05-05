@@ -100,6 +100,26 @@ class SignalFeatureExtractor(_BaseProcess):
 
         self.n_features = SignalFeatureExtractor._get_n_feats(self.features)
 
+    def _call(self):
+        if 'Processed' in self.data:
+            days = [i for i in self.data['Processed']['Gait'] if 'Day' in i]
+        else:
+            days = ['Day 1']
+
+        for iday, day in enumerate(days):
+            try:
+                start, stop = self.data['Processed']['Gait'][day]['Indices']
+            except KeyError:
+                start, stop = 0, self.data['Sensors']['Lumbar']['Accelerometer'].shape[0]
+
+            wind_acc = SignalFeatureExtractor._get_windowed_view(
+                self.data['Sensors']['Lumbar']['Accelerometer'][start:stop],
+                self.win_l,
+                self.step,
+                ensure_c_contiguity=True  # convert to c-contiguous if not already
+            )
+
+
     @staticmethod
     def _get_windowed_view(x, window_length, step_size, ensure_c_contiguity=False):
         """
