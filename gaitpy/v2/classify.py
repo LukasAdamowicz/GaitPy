@@ -119,6 +119,33 @@ class SignalFeatureExtractor(_BaseProcess):
                 ensure_c_contiguity=True  # convert to c-contiguous if not already
             )
 
+            # shape of the expected resulting features
+            n_ax = (1 if wind_acc.ndim == 2 else wind_acc.shape[-1])
+            fshape = (
+                wind_acc.shape[0],
+                self.n_features * n_ax
+            )
+            feats = zeros(fshape)
+
+            # compute the features
+            cnt = 0
+            for i, fname in enumerate(self.features):
+                func = getattr(SF, fname)  # get the function from signal_features
+                for kwd in self.features[fname]:  # iterate over the keyword arguments
+                    tmp = func(wind_acc, **kwd)
+
+                    if isinstance(tmp, tuple):
+                        for ft in tmp:
+                            i2 = cnt + n_ax
+                            feats[:, cnt:i2] = ft
+
+                            cnt += n_ax
+                    else:
+                        i2 = cnt + (SF.FEATS_PER_FINC[fname] * n_ax)
+                        feats[:, cnt:i2] = tmp
+                        cnt += (SF.FEATS_PER_FINC[fname] * n_ax)
+
+            self.data = (f'Processed/Gait/{day}/Signal Features', feats)
 
     @staticmethod
     def _get_windowed_view(x, window_length, step_size, ensure_c_contiguity=False):
