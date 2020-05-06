@@ -197,8 +197,26 @@ class RFGaitClassifier:
                     res = self._call(acc[start:stop])
 
     def _call(self, vacc):
+        # TODO filter
+
         # window the vertical acceleration
         win_vacc = RFGaitClassifier._get_windowed_view(vacc, self.win_l, self.step, True)
+
+        # set-up the space for the features
+        feats = zeros((win_vacc.shape[0], 8))
+
+        # compute the features
+        ft_freq = SF.dominant_frequency(win_vacc, self.fs, low_cutoff=0.0, high_cutoff=12.0)
+
+        feats[:, 0] = ft_freq[2]  # dominant frequency ratio
+        feats[:, 1] = ft_freq[0]  # dominant frequency value
+        feats[:, 2] = SF.mean_cross_rate(win_vacc, axis=1)
+        feats[:, 3] = SF.signal_range(win_vacc, axis=1)
+        feats[:, 4] = SF.signal_rms(win_vacc, axis=1)
+        feats[:, 5] = SF.signal_entropy(win_vacc)
+        feats[:, 6] = ft_freq[4]  # spectral entropy
+        feats[:, 7] = ft_freq[3]  # spectral flatness
+
 
     @staticmethod
     def _get_windowed_view(x, window_length, step_size, ensure_c_contiguity=False):
