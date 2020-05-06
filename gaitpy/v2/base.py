@@ -10,6 +10,28 @@ PROC = 'Processed/Gait/Day {day_n}/{value}'
 DATA = 'Sensors/Lumbar/{data}'
 
 
+class _Process:
+    def __init__(self, sampling_frequency=None):
+        """
+        General class (hidden), intended to be subclassed
+        """
+        self.fs = sampling_frequency
+
+    def process(self, *data):
+        """
+        Run the processing for the step.
+
+        Parameters
+        ----------
+        data : {str, dict, numpy.ndarray, pandas.DataFrame}
+
+        Returns
+        -------
+
+        """
+
+
+
 class _BaseProcess:
     def __init__(self, sampling_frequency=None):
         """
