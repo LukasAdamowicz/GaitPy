@@ -1,33 +1,250 @@
 """
 Classes for classifying IMU data as gait or not-gait
 """
-from copy import deepcopy
-from numpy import require, zeros
+import pandas as pd
+from numpy import require, zeros, sign, ndarray
 from numpy.lib.stride_tricks import as_strided
+import h5py
 
 from gaitpy.v2.base import _BaseProcess
 
 import signal_features as SF
 
 
-__all__ = ['DEFAULT_FEATURES']
+__all__ = []
 
 
-DEFAULT_FEATURES = {
-    'signal_entropy': [{}],
-    'signal_rms': [dict(axis=-2)],
-    'signal_range': [dict(axis=-2)],
-    'dominant_frequency': [dict(low_cutoff=0.0, high_cutoff=12.0)],
-    'mean_cross_rate': [dict(axis=-2)]
-}
+class RFGaitClassifier:
+    def __init__(self, sampling_frequency, window_length=3.0, step_size=1.0, correct_alignment=False):
+        """
+        Classify windows of time-series acceleration data as either gait or non-gait. Optionally correct for
+        accelerometer axis alignment with vertical, window, compute signal features, and classify as gait using
+        a Random Forest model.
 
-REQUIRE_SAMPLING_RATE = [
-    'signal_linear_slope',
-    'jerk_metric',
-    'dimensionless_jerk',
-    'signal_sparc',
-    'dominant_frequency'
-]
+        Parameters
+        ----------
+        sampling_frequency : float
+            Sampling frequency of the time-series data
+        window_length : float, optional
+            Window length in seconds. Default is 3.0s
+        step_size : float, int, optional
+            Window step size. If a float between 0 and 1.0, taken as the percentage of a window to skip
+            between window centers. If an integer greater or equal to 1, taken as the number of samples to skip
+            between window centers. Default is 1.0 (windows with no overlap).
+        correct_alignment : bool, optional
+            Correct the alignment of the vertical sensor axis. Default is False. Using this correction requires that the
+            data from all three axes be provided.
+
+        Examples
+        --------
+        Step 1.0s (2.0 * 0.5) between window centers. This results in the first half of a window overlapping with the
+        previous window, and the second half overlapping with the following window
+        >>> rfcls = RFGaitClassifier(50.0, window_length=2.0, step_size=0.5)
+
+        Step 50 samples between window centers
+        >>> rfcls = RFGaitClassifier(50.0, window_length=3.0, step_size=50)
+        """
+        self.fs = sampling_frequency
+
+        # save for str/repr
+        if window_length > 0:
+            self.window_length = window_length
+        else:
+            raise ValueError("'window_length' must be positive")
+        self.step_size = step_size
+
+        self.win_l = int(window_length * self.fs)
+        if isinstance(step_size, float):
+            if step_size == 1.0:
+                self.step = self.win_l
+            elif 0.0 <= step_size < 1.0:
+                tmp_ = int(self.win_l * step_size)
+                self.step = tmp_ if tmp_ >= 1 else 1
+            else:
+                raise ValueError('Float step_size must be between 0.0 and 1.0')
+        elif isinstance(step_size, int):
+            if step_size >= 1:
+                self.step = step_size
+            else:
+                raise ValueError('Integer step_size must be greater than or equal to 1')
+        else:
+            raise ValueError('step_size must be either a float or integer')
+
+    def predict(self, data, axis=None, indices=None):
+        """
+        Classify gait
+
+        Parameters
+        ----------
+        data : {str, dict, numpy.ndarray, pandas.DataFrame}
+            A string to an H5 file, a dictionary, ndarray, or DataFrame containing the raw accelerometer data to
+            classify as gait/non-gait. If 1D, it is assumed to be the vertical axis, with . If 3D, the `axis` argument is
+            required to specify which axis is aligned with vertical. If `correct_alignment=True`, then the input must
+            be 3D. See Notes for where the accelerometer data should be located in H5 files or dictionaries.
+        axis : int, optional
+            Required if providing 3D data, the axis that is best aligned with vertical. Alignment should be specified as
+            either positive (axis pointing "up", measured still acceleration -9.8m/s^2) or negative (axis pointing
+            "down", measured still acceleration 9.8m/s^2).
+        indices : array_like, optional
+            Indices for the start and stop of specific days. Only used if data is a ndarray or DataFrame. If providing
+            a H5 file path or dictionary, these indices should be stored in the object itself (see Notes).
+
+        Returns
+        -------
+
+        Notes
+        -----
+        If `data` is a H5 file or dictionary, the accelerometer data (as ndarrays) should be located in
+        `data['Sensors']['Lumbar']['Accelerometer']`. Indices should be located in
+        `data['Processed']['Gait']['Day #']['Indices']` as a 2 element array [start, stop] for each day.
+
+        Examples
+        --------
+        Providing a H5 file path:
+        >>> path = '/folder1/study1/data/data.h5'
+        >>> rfcls.predict(path, axis=1)  # use the y axis as aligned with vertical and pointing up
+
+        Providing a 1D pandas.DataFrame
+        >>> data = pd.DataFrame(accel_data)
+        >>> rfcls.predict(data)
+
+        Providing day start and stop indices for 2 days
+        >>> data = accel_data
+        >>> indices = np.array([[0, 324000], [324000, 785700]])
+        >>> rfcls.predict(data, indices=indices)
+        """
+        if isinstance(data, pd.DataFrame):
+            tmp = data.values
+
+            if tmp.shape[1] == 1:
+                acc = tmp.flatten()
+            else:
+                if axis is None:
+                    raise ValueError("'axis' must be specified for non-1d input data.")
+                else:
+                    acc = tmp[abs(axis)] * sign(axis)
+
+            if indices is not None:
+                res = {}
+                for i, idx in enumerate(indices):
+                    res[f'Day {i+1}'] = self._call(acc[idx[0]:idx[1]])
+            else:
+                res = self._call(acc)
+
+            return res
+        elif isinstance(data, ndarray):
+            if data.ndim == 1:
+                acc = data
+            else:
+                if axis is None:
+                    raise ValueError("'axis' must be specified for non-1d input data.")
+                else:
+                    data[abs(axis)] * sign(axis)
+
+            if indices is not None:
+                res = {}
+                for i, idx in enumerate(indices):
+                    res[f'Day {i + 1}'] = self._call(acc[idx[0]:idx[1]])
+            else:
+                res = self._call(acc)
+
+            return res
+        elif isinstance(data, dict):
+            if data['Sensors']['Lumbar']['Accelerometer'].ndim == 1:
+                acc = data['Sensors']['Lumbar']['Accelerometer']
+            else:
+                if axis is None:
+                    raise ValueError("'axis' must be specified for non-1d input data.")
+                else:
+                    acc = data['Sensors']['Lumbar']['Accelerometer'][abs(axis)] * sign(axis)
+
+            if 'Processed' in data:
+                days = [i for i in data['Processed']['Gait'] if 'Day' in i]
+            else:
+                days = ['Day 1']
+
+            for day in days:
+                try:
+                    start, stop = data['Processed']['Gait'][day]['Indices']
+                except KeyError:
+                    start, stop = 0, acc.size
+
+                # TODO assign to dictionary
+                res = self._call(acc[start:stop])
+
+        else:
+            with h5py.File(data, 'r') as f:
+                if f['Sensors/Lumbar/Accelerometer'].ndim == 1:
+                    acc = f['Sensors/Lumbar/Accelerometer'][()]
+                else:
+                    if axis is None:
+                        raise ValueError("'axis' must be specified for non-1d input data.")
+                    else:
+                        acc = f['Sensors/Lumbar/Accelerometer'][abs(axis)] * sign(axis)
+
+                if 'Processed' in f:
+                    days = [i for i in data['Processed/Gait'] if 'Day' in i]
+                else:
+                    days = ['Day 1']
+
+                for day in days:
+                    try:
+                        start, stop = data[f'Processed/Gait/{day}/Indices']
+                    except KeyError:
+                        start, stop = 0, acc.size
+
+                    # TODO assign into h5
+                    res = self._call(acc[start:stop])
+
+    def _call(self, vacc):
+        # window the vertical acceleration
+        win_vacc = RFGaitClassifier._get_windowed_view(vacc, self.win_l, self.step, True)
+
+    @staticmethod
+    def _get_windowed_view(x, window_length, step_size, ensure_c_contiguity=False):
+        """
+        Return a moving window view over the data
+
+        Parameters
+        ----------
+        x : numpy.ndarray
+            1- or 2-D array of signals to window. Windows occur along the 0 axis. Must be C-contiguous.
+        window_length : int
+            Window length/size.
+        step_size : int
+            Step/stride size for windows - how many samples to step from window center to window center.
+        ensure_c_contiguity : bool, optional
+            Create a new array with C-contiguity if the passed array is not C-contiguous. This *may* result in the
+            memory requirements significantly increasing. Default is False, which will raise a ValueError if `x` is
+            not C-contiguous
+
+        Returns
+        -------
+        x_win : numpy.ndarray
+            2- or 3-D array of windows of the original data, of shape (..., L[, ...])
+        """
+        if not (x.ndim in [1, 2]):
+            raise ValueError('Array cannot have more than 2 dimensions.')
+
+        if ensure_c_contiguity:
+            x = require(x, requirements=['C'])
+        else:
+            if not x.flags['C_CONTIGUOUS']:
+                raise ValueError("Input array must be C-contiguous.  See numpy.ascontiguousarray")
+
+        if x.ndim == 1:
+            nrows = ((x.size - window_length) // step_size) + 1
+            n = x.strides[0]
+            return as_strided(x, shape=(nrows, window_length), strides=(step_size * n, n), writeable=False)
+
+        else:
+            k = x.shape[1]
+            nrows = ((x.shape[0] - window_length) // step_size) + 1
+            n = x.strides[1]
+
+            new_shape = (nrows, window_length, k)
+            new_strides = (step_size * k * n, k * n, n)
+            return as_strided(x, shape=new_shape, strides=new_strides, writeable=False)
 
 
 class SignalFeatureExtractor(_BaseProcess):
